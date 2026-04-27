@@ -10,6 +10,13 @@
 name: Publish Docker image
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/docker.yml'
+      - '.github/actions/get-tag-name/action.yml'
+      - '.devops/**'
   workflow_dispatch: # allows manual triggering
   schedule:
     # Rebuild daily rather than on every push because it is expensive
