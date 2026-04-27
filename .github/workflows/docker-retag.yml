@@ -1,0 +1,104 @@
+name: Retag Docker images from digests
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Source workflow run id with digest artifacts
+        required: true
+        type: string
+      source_tag:
+        description: Source git/image version tag (for versioned manifest tags)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  packages: write
+  contents: read
+
+jobs:
+  retag_from_artifacts:
+    name: Create shared tags from digest artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download digest artifacts from source run
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          pattern: digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Show downloaded artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la /tmp/digests
+          for file in /tmp/digests/*.tsv; do
+            echo "--- ${file}"
+            cat "${file}"
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Log in to Docker Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest tags from digests
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+
+          REPO_OWNER="${GITHUB_REPOSITORY_OWNER@L}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          IMAGE_REPO="ghcr.io/${REPO_OWNER}/${REPO_NAME}"
+          PREFIX="${IMAGE_REPO}:"
+          DIGEST_GLOB="/tmp/digests/*.tsv"
+
+          if ! ls ${DIGEST_GLOB} >/dev/null 2>&1; then
+            echo "No digest metadata found in /tmp/digests" >&2
+            exit 1
+          fi
+
+          mapfile -t COMBOS < <(awk -F '\t' '{ print $1 "\t" $3 }' ${DIGEST_GLOB} | sort -u)
+
+          if [[ ${#COMBOS[@]} -eq 0 ]]; then
+            echo "No tag/image_type combos found in digest metadata" >&2
+            exit 1
+          fi
+
+          for combo in "${COMBOS[@]}"; do
+            IFS=$'\t' read -r tag_name image_type <<< "${combo}"
+
+            if [[ "${tag_name}" == "cpu" ]]; then
+              suffix=""
+            else
+              suffix="-${tag_name}"
+            fi
+
+            merged_tag="${PREFIX}${image_type}${suffix}"
+            merged_versioned_tag="${merged_tag}-${SOURCE_TAG}"
+
+            mapfile -t refs < <(awk -F '\t' -v t="${tag_name}" -v i="${image_type}" '$1 == t && $3 == i { print $4 }' ${DIGEST_GLOB} | sort -u | sed "s#^#${IMAGE_REPO}@#")
+
+            if [[ ${#refs[@]} -eq 0 ]]; then
+              echo "Skipping empty combo tag=${tag_name} image_type=${image_type}"
+              continue
+            fi
+
+            echo "Creating ${merged_tag} from ${refs[*]}"
+            docker buildx imagetools create --tag "${merged_tag}" "${refs[@]}"
+
+            echo "Creating ${merged_versioned_tag} from ${refs[*]}"
+            docker buildx imagetools create --tag "${merged_versioned_tag}" "${refs[@]}"
+          done
