@@ -158,8 +158,10 @@ git clone https://github.com/turbo-tan/llama.cpp-tq3.git
 cd llama.cpp-tq3
 
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake --build build --config Release -j
 ```
+
+Note: --config Release is needed for MVCS on Windows, but not needed for Makefiles or Ninja on Linux, as MVCS ignores the BUILD_TYPE for Makefiles/Ninja.
 
 For a clean standalone Ampere rebuild that prefers colocated `libllama` / `libggml` instead of environment copies:
 
