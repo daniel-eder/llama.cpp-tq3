@@ -2018,7 +2018,14 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.SSM_NORM,
         MODEL_TENSOR.SSM_BETA,
         MODEL_TENSOR.SSM_ALPHA,
-        MODEL_TENSOR.SSM_OUT
+        MODEL_TENSOR.SSM_OUT,
+        # NextN/MTP tensors - preserved but unused
+        MODEL_TENSOR.NEXTN_EH_PROJ,
+        MODEL_TENSOR.NEXTN_EMBED_TOKENS,
+        MODEL_TENSOR.NEXTN_ENORM,
+        MODEL_TENSOR.NEXTN_HNORM,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
     ],
     MODEL_ARCH.QWEN35MOE: [
         MODEL_TENSOR.TOKEN_EMBD,
@@ -2049,7 +2056,14 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.SSM_NORM,
         MODEL_TENSOR.SSM_BETA,
         MODEL_TENSOR.SSM_ALPHA,
-        MODEL_TENSOR.SSM_OUT
+        MODEL_TENSOR.SSM_OUT,
+        # NextN/MTP tensors - preserved but unused
+        MODEL_TENSOR.NEXTN_EH_PROJ,
+        MODEL_TENSOR.NEXTN_EMBED_TOKENS,
+        MODEL_TENSOR.NEXTN_ENORM,
+        MODEL_TENSOR.NEXTN_HNORM,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
     ],
     MODEL_ARCH.PLAMO: [
         MODEL_TENSOR.TOKEN_EMBD,
@@ -4025,6 +4039,8 @@ class GGMLQuantizationType(IntEnum):
     MXFP4   = 39
     NVFP4   = 40
     Q1_0    = 41
+    TQ3_1S  = 44
+    TQ3_4S  = 46
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -4197,6 +4213,8 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.MXFP4:   (32, 1 + 16),
     GGMLQuantizationType.NVFP4:   (64, 4 + 32),
     GGMLQuantizationType.Q1_0:    (128, 2 + 16),
+    GGMLQuantizationType.TQ3_1S:  (32, 16),
+    GGMLQuantizationType.TQ3_4S:  (32, 16),
 }
 
 

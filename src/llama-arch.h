@@ -45,6 +45,8 @@ enum llm_arch {
     LLM_ARCH_QWEN3VLMOE,
     LLM_ARCH_QWEN35,
     LLM_ARCH_QWEN35MOE,
+    LLM_ARCH_QWEN35_MTP,
+    LLM_ARCH_QWEN35MOE_MTP,
     LLM_ARCH_PHI2,
     LLM_ARCH_PHI3,
     LLM_ARCH_PHIMOE,
@@ -61,6 +63,7 @@ enum llm_arch {
     LLM_ARCH_GEMMA3,
     LLM_ARCH_GEMMA3N,
     LLM_ARCH_GEMMA4,
+    LLM_ARCH_GEMMA4_MTP,
     LLM_ARCH_GEMMA_EMBEDDING,
     LLM_ARCH_STARCODER2,
     LLM_ARCH_MAMBA,
@@ -554,6 +557,8 @@ enum llm_tensor {
     LLM_TENSOR_NEXTN_HNORM,
     LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,
     LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,
+    LLM_TENSOR_MTP_PRE_PROJ,
+    LLM_TENSOR_MTP_POST_PROJ,
 };
 
 enum llm_tensor_layer {
@@ -636,3 +641,4 @@ bool llm_arch_is_recurrent      (const llm_arch & arch);
 bool llm_arch_is_hybrid         (const llm_arch & arch);
 bool llm_arch_is_diffusion      (const llm_arch & arch);
 bool llm_arch_supports_sm_tensor(const llm_arch & arch);
+bool llm_arch_supports_recurrent_partial_rollback(const llm_arch & arch);

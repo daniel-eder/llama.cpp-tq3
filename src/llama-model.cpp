@@ -134,6 +134,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_gemma3n(params);
         case LLM_ARCH_GEMMA4:
             return new llama_model_gemma4(params);
+        case LLM_ARCH_GEMMA4_MTP:
+            return new llama_model_gemma4_mtp(params);
         case LLM_ARCH_GEMMA_EMBEDDING:
             return new llama_model_gemma_embedding(params);
         case LLM_ARCH_STARCODER2:
@@ -276,6 +278,10 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_qwen35(params);
         case LLM_ARCH_QWEN35MOE:
             return new llama_model_qwen35moe(params);
+        case LLM_ARCH_QWEN35_MTP:
+            return new llama_model_qwen35_mtp(params);
+        case LLM_ARCH_QWEN35MOE_MTP:
+            return new llama_model_qwen35moe_mtp(params);
         case LLM_ARCH_MISTRAL3:
             return new llama_model_mistral3(params);
         case LLM_ARCH_MIMO2:
@@ -308,6 +314,15 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para
     llm_arch arch = ml.get_arch();
     if (arch == LLM_ARCH_UNKNOWN) {
         throw std::runtime_error("unknown model architecture: '" + ml.get_arch_name() + "'");
+    }
+    if (params.override_arch != nullptr && params.override_arch[0] != '\0') {
+        const llm_arch override = llm_arch_from_string(params.override_arch);
+        if (override == LLM_ARCH_UNKNOWN) {
+            throw std::runtime_error(std::string("unknown override architecture: '") + params.override_arch + "'");
+        }
+        LLAMA_LOG_INFO("%s: overriding architecture %s -> %s\n",
+                __func__, llm_arch_name(arch), llm_arch_name(override));
+        arch = override;
     }
 
     return llama_model_create(arch, params);
@@ -1176,6 +1191,11 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, direct_io = %s)\n",
         __func__, ml.use_mmap ? "true" : "false", ml.use_direct_io ? "true" : "false");
 
+    if (params.n_gpu_layers >= 0 && uint32_t(params.n_gpu_layers) != this->n_gpu_layers()) {
+        LLAMA_LOG_WARN("%s: clamping requested n_gpu_layers=%d to %d for this architecture\n",
+                __func__, params.n_gpu_layers, n_gpu_layers);
+    }
+
     // build a list of buffer types for the CPU and GPU devices
     pimpl->cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
     for (const auto & dev : devices) {
@@ -1400,7 +1420,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    ml.done_getting_tensors();
+    const bool partial_load = (arch == LLM_ARCH_QWEN35_MTP || arch == LLM_ARCH_QWEN35MOE_MTP);
+    ml.done_getting_tensors(partial_load);
 
     // populate tensors_by_name
     for (auto & [_, ctx_ptr] : ml.ctx_map) {
@@ -1583,7 +1604,18 @@ const float * llama_model::tensor_split() const {
 }
 
 uint32_t llama_model::n_gpu_layers() const {
-    return params.n_gpu_layers >= 0 ? params.n_gpu_layers : hparams.n_layer + 1;
+    uint32_t n_gpu_layers = params.n_gpu_layers >= 0 ? params.n_gpu_layers : hparams.n_layer + 1;
+
+    const bool is_qwen35_native_mtp =
+        (arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE ||
+         arch == LLM_ARCH_QWEN35_MTP || arch == LLM_ARCH_QWEN35MOE_MTP) &&
+        hparams.nextn_predict_layers > 0;
+
+    if (is_qwen35_native_mtp && n_gpu_layers > hparams.n_layer) {
+        n_gpu_layers = hparams.n_layer;
+    }
+
+    return n_gpu_layers;
 }
 
 llama_split_mode llama_model::split_mode() const {
@@ -1945,6 +1977,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.offload_kqv,
                             std::max((uint32_t) 1, cparams.n_seq_max),
                             cparams.n_seq_max,
+                            cparams.n_rs_seq,
                             nullptr);
                 } else if (llm_arch_is_hybrid(arch)) {
                     // The main difference between hybrid architectures is the
@@ -1978,6 +2011,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* recurrent_type_s  */ GGML_TYPE_F32,
                             /* recurrent_rs_size */ std::max((uint32_t) 1, cparams.n_seq_max),
                             /* n_seq_max         */ cparams.n_seq_max,
+                            /* n_rs_seq          */ cparams.n_rs_seq,
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
@@ -1996,6 +2030,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* recurrent_type_v  */ GGML_TYPE_F32,
                             /* recurrent_kv_size */ std::max((uint32_t) 1, cparams.n_seq_max),
                             /* n_seq_max         */ cparams.n_seq_max,
+                            /* n_rs_seq          */ cparams.n_rs_seq,
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
@@ -2092,6 +2127,7 @@ llama_model_params llama_model_default_params() {
         /*.progress_callback           =*/ nullptr,
         /*.progress_callback_user_data =*/ nullptr,
         /*.kv_overrides                =*/ nullptr,
+        /*.override_arch               =*/ nullptr,
         /*.vocab_only                  =*/ false,
         /*.use_mmap                    =*/ true,
         /*.use_direct_io               =*/ false,
@@ -2277,6 +2313,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_GEMMA3:
         case LLM_ARCH_GEMMA3N:
         case LLM_ARCH_GEMMA4:
+        case LLM_ARCH_GEMMA4_MTP:
         case LLM_ARCH_GEMMA_EMBEDDING:
         case LLM_ARCH_STARCODER2:
         case LLM_ARCH_OPENELM:
@@ -2316,6 +2353,8 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN3VLMOE:
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_QWEN35MOE:
+        case LLM_ARCH_QWEN35_MTP:
+        case LLM_ARCH_QWEN35MOE_MTP:
             return LLAMA_ROPE_TYPE_IMROPE;
 
         case LLM_ARCH_GLM4:

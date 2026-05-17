@@ -5446,13 +5446,84 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
+class _Qwen35MRopeMixin:
+    # Qwen3.5 always applies interleaved MRoPE. Write the default sections
+    # when checkpoints omit them so the QWEN35 loaders have required metadata.
+    _QWEN35_DEFAULT_MROPE_SECTION = [11, 11, 10, 0]
+
+    gguf_writer: gguf.GGUFWriter
+    rope_parameters: dict
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()  # ty: ignore[unresolved-attribute]
+        if "mrope_section" not in self.rope_parameters:
+            self.gguf_writer.add_rope_dimension_sections(self._QWEN35_DEFAULT_MROPE_SECTION)
+
+
+class _Qwen35MtpMixin:
+    """Shared MTP wiring for Qwen3.5/3.6 text variants. The HF config carries
+    the MTP block under `mtp_num_hidden_layers` and the tensors under
+    `mtp.*`; we extend block_count, emit the nextn metadata key, and remap
+    `mtp.*` to the standard layer-indexed nextn naming so the existing
+    tensor_map handles them."""
+
+    # Class-level annotations so the type checker understands the attributes
+    # available on the concrete subclasses in the MRO
+    hparams: dict[str, Any]
+    model_arch: gguf.MODEL_ARCH
+    gguf_writer: gguf.GGUFWriter
+    block_count: int
+    tensor_map: gguf.TensorNameMap
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.block_count = self.hparams["num_hidden_layers"] + self.hparams.get("mtp_num_hidden_layers", 0)
+        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()  # ty: ignore[unresolved-attribute]
+        if (n := self.hparams.get("mtp_num_hidden_layers", 0)) > 0:
+            self.gguf_writer.add_nextn_predict_layers(n)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Multimodal Qwen3.5/3.6 wrap the text model under `model.language_model.*`.
+        if name.startswith("model.language_model."):
+            name = "model." + name[len("model.language_model."):]
+        elif name.startswith("language_model."):
+            name = name[len("language_model."):]
+
+        # Remap MTP block tensors to llama.cpp's layer-indexed nextn naming.
+        # HF: mtp.layers.0.*  (transformer block at MTP slot 0)
+        #     mtp.fc / mtp.pre_fc_norm_embedding / mtp.pre_fc_norm_hidden / mtp.norm
+        if name.startswith("mtp."):
+            n_layer = self.hparams["num_hidden_layers"]
+            if name.find("layers.") != -1:
+                assert bid is not None
+                name = name.replace(f"mtp.layers.{bid}", f"model.layers.{bid + n_layer}")
+            else:
+                remapper = {
+                    "mtp.fc":                    "model.layers.{bid}.eh_proj",
+                    "mtp.pre_fc_norm_embedding": "model.layers.{bid}.enorm",
+                    "mtp.pre_fc_norm_hidden":    "model.layers.{bid}.hnorm",
+                    "mtp.norm":                  "model.layers.{bid}.shared_head.norm",
+                }
+                stem   = Path(name).stem
+                suffix = Path(name).suffix
+                tmpl   = remapper[stem] + suffix
+                for b in range(n_layer, self.block_count):
+                    yield from super().modify_tensors(data_torch, tmpl.format(bid=b), b)  # ty: ignore[unresolved-attribute]
+                return
+
+        yield from super().modify_tensors(data_torch, name, bid)  # ty: ignore[unresolved-attribute]
+
+
 @ModelBase.register("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM")
-class Qwen3_5TextModel(_LinearAttentionVReorderBase):
+class Qwen3_5TextModel(_Qwen35MtpMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35
 
 
 @ModelBase.register("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
-class Qwen3_5MoeTextModel(_LinearAttentionVReorderBase):
+class Qwen3_5MoeTextModel(_Qwen35MtpMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
 
@@ -7821,6 +7892,64 @@ class Gemma4Model(Gemma3Model):
             name += ".weight"
 
         yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("Gemma4AssistantForCausalLM")
+class Gemma4AssistantModel(Gemma4Model):
+    model_arch = gguf.MODEL_ARCH.GEMMA4
+
+    """Convert Google's Gemma 4 MTP assistant checkpoint to a sidecar GGUF.
+
+    The assistant is not a normal Gemma 4 trunk: its top-level config wraps the
+    tiny text stack in `text_config` and adds projection / masked-embedding
+    tensors used by the MTP algorithm. Keep those assistant-specific tensors
+    under stable raw names so the runtime implementation can consume them
+    without losing information during conversion.
+    """
+
+    def __init__(self, *args, **kwargs):
+        hparams = kwargs.get("hparams")
+        if hparams is None:
+            dir_model = args[0] if args else kwargs["dir_model"]
+            full_config = ModelBase.load_hparams(Path(dir_model), self.is_mistral_format)
+        else:
+            full_config = hparams
+
+        text_config = dict(full_config["text_config"])
+        text_config["architectures"] = ["Gemma4ForConditionalGeneration"]
+        text_config["_assistant_config"] = full_config
+        kwargs["hparams"] = text_config
+        super().__init__(*args, **kwargs)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        cfg = self.hparams["_assistant_config"]
+        self.gguf_writer.add_string("gemma4.assistant.type", "mtp")
+        self.gguf_writer.add_uint32("gemma4.assistant.backbone_hidden_size", cfg["backbone_hidden_size"])
+        self.gguf_writer.add_uint32("gemma4.assistant.num_centroids", cfg["num_centroids"])
+        self.gguf_writer.add_uint32("gemma4.assistant.centroid_intermediate_top_k", cfg["centroid_intermediate_top_k"])
+        self.gguf_writer.add_bool("gemma4.assistant.use_ordered_embeddings", cfg.get("use_ordered_embeddings", False))
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name == "pre_projection.weight":
+            yield ("assistant.pre_projection.weight", data_torch)
+            return
+        if name == "post_projection.weight":
+            yield ("assistant.post_projection.weight", data_torch)
+            return
+        if name.startswith("masked_embedding."):
+            return
+
+        if name.startswith("model."):
+            yield (self.map_tensor_name(name), data_torch)
+            return
+
+        yield ("assistant." + name, data_torch)
+        return
+
+    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+        return ()
 
 
 @ModelBase.register("Gemma4ForConditionalGeneration")
